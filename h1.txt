@@ -1,0 +1,184 @@
+CS 4321 INTRODUCTION TO DATABASE SYSTEM
+HOMEWORK 1
+
+Bowen Gao(bg428)
+Hui Xu(hx93)
+Siyao Zhu(sz427)
+
+1.(a)
+
+SELECT * 
+FROM Customer 
+WHERE cid IN (
+SELECT DISTINCT p2.cid 
+FROM Product p1, Purchase p2 
+WHERE p1.msrp > p2.price AND p1.pid = p2.pid);
+
+1.(b)
+
+SELECT p.cid, p.pid
+FROM Purchase p
+GROUP BY p.cid, p.pid
+HAVING COUNT(*) = 3;
+
+1.(c)
+
+SELECT p.pid, MAX(p.price) 
+FROM Purchase p
+GROUP BY p.pid;
+
+1.(d)
+
+SELECT cid, cname,0 AS NumOfPur
+FROM Customer c 
+WHERE NOT EXISTS(
+	SELECT * FROM Purchase p WHERE p.cid=c.cid) 
+UNION 
+SELECT C.cid, C.cname, COUNT(Pu.pid) 
+FROM Customer C, Purchase Pu 
+WHERE C.cid=Pu.cid 
+GROUP BY C.cid, C.cname;
+
+1.(e)
+
+SELECT DISTINCT t1.cid1, t2.cid2, t2.n/(t1.u-t2.n) AS JaccardSimilarity
+FROM(
+	SELECT tp1.cid AS cid1, tp2.cid AS cid2, tp1.u1+tp2.u2 AS u
+	FROM(
+		SELECT p.cid, COUNT(DISTINCT p.pid) AS u1
+		FROM Purchase p
+		GROUP BY cid
+	) AS tp1, 
+	(
+		SELECT p.cid, COUNT(DISTINCT p.pid) AS u2
+		FROM Purchase p
+		GROUP BY cid
+	) AS tp2
+	WHERE tp1.cid < tp2.cid 
+	GROUP BY tp1.cid, tp2.cid
+) AS t1; 
+NATURAL JOIN((
+	SELECT p1.cid AS cid1, p2.cid AS cid2, COUNT(DISTINCT p1.pid) AS n
+	FROM Purchase p1, Purchase p2
+	WHERE p1.pid = p2.pid AND p1.cid < p2.cid
+	GROUP BY p1.cid,p2.cid
+	)
+	UNION(
+		SELECT DISTINCT p1.cid AS cid1, p2.cid AS cid2, 0 AS n
+		FROM Purchase p1, Purchase p2
+		WHERE p1.cid<p2.cid AND NOT EXISTS(
+			SELECT * 
+			FROM Purchase p3, Purchase p4 
+			WHERE p1.cid = p3.cid AND p4.cid = p2.cid AND p4.pid = p3.pid
+		) 
+	)
+) AS t2 
+ORDER BY JaccardSimilarity DESC;
+
+3.(a)
+
+ALTER TABLE Reserves ADD CONSTRAINT constraint1 
+CHECK(
+Reserves.startdate + Reserves.starttime < Reserves.enddate + Reserves.endtime
+AND EXTRACT(SECOND FROM Reserves.starttime) = 0
+AND EXTRACT(MINUTE FROM Reserves.starttime) = 0
+AND EXTRACT(SECOND FROM Reserves.endtime) = 0
+AND EXTRACT(MINUTE FROM Reserves.endtime) = 0
+);
+
+3.(b)
+
+CREATE OR REPLACE FUNCTION constraint2() RETURNS trigger AS $constraint2$
+DECLARE
+	find INTEGER;
+	BEGIN
+		SELECT COUNT(*) INTO find FROM ( SELECT * FROM Reserves r WHERE NEW.bid = r.bid ) AS t
+		WHERE (
+			( t.startdate + t.starttime, t.enddate + t.endtime ) 
+			OVERLAPS 
+			( NEW.startdate + NEW.starttime, NEW.enddate + NEW.endtime )
+		);
+		IF find > 0 THEN
+			RAISE EXCEPTION 'Time Overlap is not allowed!';
+		END IF;
+		RETURN NEW;		
+	END;
+$constraint2$ LANGUAGE plpgsql;
+
+CREATE TRIGGER constraint2
+BEFORE INSERT OR UPDATE ON Reserves
+	FOR EACH ROW EXECUTE PROCEDURE constraint2();
+
+3.(c)
+
+CREATE OR REPLACE FUNCTION constraint3() RETURNS trigger AS $constraint3$
+DECLARE
+	stamp RECORD;
+	newstart TIMESTAMP;
+	newstart_1 TIMESTAMP;
+	newend TIMESTAMP;
+	newend_1 TIMESTAMP;
+	l TIMESTAMP;
+	r TIMESTAMP;
+	sum INTERVAL;
+	i INTERVAL;
+
+	BEGIN
+		newstart := NEW.startdate + NEW.starttime;
+		newend := NEW.enddate + NEW.endtime;
+		i = 0;
+		IF newend-newstart > INTERVAL '8:0:0' THEN
+			RAISE EXCEPTION 'ERROR: Reservation > 8 hrs!';
+		END IF;
+		LOOP
+			EXIT WHEN i > INTERVAL '24:0:0' + newend - newstart; 
+			newstart_1 := newstart - interval '24:0:0' + i;
+			newend_1 := newstart_1 + interval '24:0:0';
+
+			IF( newstart_1 < newstart ) THEN
+				l = newstart;
+			ELSE l = newstart_1;
+			END IF;
+
+			IF( newend_1 < newend ) THEN
+				r = newend_1;
+			ELSE r = newend;
+			END IF;
+			
+          			 sum = r - l;
+
+			FOR stamp IN(
+				SELECT t.startdate + t.starttime AS startstamp,
+					t.enddate + t.endtime AS endstamp
+				FROM ( SELECT * FROM Reserves r WHERE NEW.bid = r.bid ) AS t
+				WHERE ( newstart_1, newend_1 )
+					OVERLAPS
+					( t.startdate + t.starttime, t.enddate + t.endtime )
+			)
+			LOOP
+				IF( newstart_1 < stamp.startstamp ) THEN
+					l = stamp.startstamp;
+				ELSE l = newstart_1;
+				END IF;
+
+				IF( newend_1 < stamp.endstamp ) THEN
+					r = newend_1;
+				ELSE r = stamp.endstamp;
+				END IF;
+				sum = sum + ( r - l ) ; 
+
+			END LOOP;
+
+			IF sum > INTERVAL '8:0:0' THEN
+				RAISE EXCEPTION 'ERROR: Reservation > 8 hrs within 24 hrs!';
+			END IF;							
+           			i = i + INTERVAL '1:0:0';
+
+		END LOOP;
+		RETURN NEW;		
+	END;
+$constraint3$ LANGUAGE plpgsql;
+
+CREATE TRIGGER constraint3
+BEFORE INSERT OR UPDATE ON Reserves
+	FOR EACH ROW EXECUTE PROCEDURE constraint3();
